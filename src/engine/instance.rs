@@ -1,5 +1,6 @@
-use super::errors::Error as EngineError;
+use super::errors::{EngineError, Result};
 use super::vulkan as vk;
+use std::error::Error;
 use std::sync::Arc;
 
 pub struct Instance {
@@ -12,16 +13,9 @@ pub struct Instance {
 }
 
 impl Instance {
-    pub fn new() -> Result<Self, EngineError> {
-        let library = match vk::VulkanLibrary::new() {
-            Ok(library) => library,
-            _ => return EngineError::VkLibraryLoad.into(),
-        };
-
-        let instance = match vk::Instance::new(library, vk::InstanceCreateInfo::default()) {
-            Ok(instance) => instance,
-            _ => return EngineError::VkInstanceCreate.into(),
-        };
+    pub fn new() -> Result<Self> {
+        let library = vk::VulkanLibrary::new()?;
+        let instance = vk::Instance::new(library, vk::InstanceCreateInfo::default())?;
 
         let physical_device = instance
             .enumerate_physical_devices()
@@ -29,18 +23,17 @@ impl Instance {
             .next()
             .expect("no devices available");
 
-        let queue_family_index = match physical_device.queue_family_properties().iter().position(
-            |queue_family_properties| {
+        let queue_family_index = physical_device
+            .queue_family_properties()
+            .iter()
+            .position(|queue_family_properties| {
                 queue_family_properties
                     .queue_flags
-                    .contains(vk::QueueFlags::GRAPHICS)
-            },
-        ) {
-            Some(queue_family_index) => queue_family_index as u32,
-            None => return EngineError::QueueFamilySearch.into(),
-        };
+                    .contains(vk::QueueFlags::COMPUTE)
+            })
+            .ok_or(EngineError::NoValidQueueFamily)? as u32;
 
-        let (device, mut queues) = match vk::Device::new(
+        let (device, mut queues) = vk::Device::new(
             physical_device,
             vk::DeviceCreateInfo {
                 queue_create_infos: vec![vk::QueueCreateInfo {
@@ -49,10 +42,7 @@ impl Instance {
                 }],
                 ..Default::default()
             },
-        ) {
-            Ok(device) => device,
-            _ => return EngineError::VkDeviceCreate.into(),
-        };
+        )?;
 
         Ok(Self {
             instance: instance.clone(),
@@ -93,17 +83,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn creation() {
+    fn creation() -> Result<()> {
         assert!(Instance::new().is_ok());
+        Ok(())
     }
 
     #[test]
-    fn version() {
+    fn version() -> Result<()> {
         let instance = Instance::new().unwrap();
         let library = vk::VulkanLibrary::new().unwrap();
 
         assert!(instance.api_version().major <= library.api_version().major);
         assert!(instance.api_version().minor <= library.api_version().minor);
         assert!(instance.api_version().patch <= library.api_version().patch);
+
+        Ok(())
     }
 }

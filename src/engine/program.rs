@@ -1,4 +1,4 @@
-use super::errors::Error as EngineError;
+use super::errors::{EngineError, Result};
 use super::instance::Instance;
 use super::vulkan as vk;
 use shaderc;
@@ -15,7 +15,7 @@ impl Program {
         source: &str,
         file_name: &str,
         entry_point: &str,
-    ) -> Result<Program, EngineError> {
+    ) -> Result<Program> {
         let compiler = shaderc::Compiler::new().unwrap();
 
         let spirv = match compiler.compile_into_spirv(
@@ -27,47 +27,38 @@ impl Program {
         ) {
             Ok(result) => result,
             Err(shaderc::Error::CompilationError(_, error_info)) => {
-                return EngineError::CompileError(error_info).into()
+                return EngineError::CompileError(error_info).into_result()
             }
-            _ => return EngineError::VkCompileError.into(),
+            Err(e) => return Err(e.into()),
         };
 
         let shared_module = {
-            match unsafe {
+            unsafe {
                 vk::ShaderModule::new(
                     instance.device.clone(),
                     vk::ShaderModuleCreateInfo::new(spirv.as_binary()),
                 )
-            } {
-                Ok(module) => module,
-                _ => return EngineError::VkSharedModuleCreate.into(),
             }
-        };
+        }?;
 
-        let shared_module = match shared_module.entry_point(entry_point) {
-            Some(shared_module) => shared_module,
-            None => return EngineError::VkShaderModuleSpecialization.into(),
-        };
+        let shared_module = shared_module
+            .entry_point(entry_point)
+            .ok_or(EngineError::WrongSpecialization)?;
 
         let stage = vk::PipelineShaderStageCreateInfo::new(shared_module);
-        let layout = match vk::PipelineLayout::new(
+
+        let layout = vk::PipelineLayout::new(
             instance.device.clone(),
             vk::PipelineDescriptorSetLayoutCreateInfo::from_stages([&stage])
                 .into_pipeline_layout_create_info(instance.device.clone())
                 .unwrap(),
-        ) {
-            Ok(layout) => layout,
-            _ => return EngineError::VkPipelineLayoutCreate.into(),
-        };
+        )?;
 
-        let compute_pipeline = match vk::ComputePipeline::new(
+        let compute_pipeline = vk::ComputePipeline::new(
             instance.device.clone(),
             None,
             vk::ComputePipelineCreateInfo::stage_layout(stage, layout),
-        ) {
-            Ok(compute_pipeline) => compute_pipeline,
-            _ => return EngineError::VkComputePipelineCreate.into(),
-        };
+        )?;
 
         Ok(Program {
             warnings: spirv.get_warning_messages(),
@@ -85,32 +76,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn compile() {
+    fn compile() -> Result<()> {
         let code = r"
             #version 460
             void main() { uint idx = gl_GlobalInvocationID.x; }
         ";
-        let instance = Instance::new().unwrap();
+        let instance = Instance::new()?;
         assert!(Program::new(&instance, &code, "test.glsl", "main").is_ok());
+        Ok(())
     }
 
     #[test]
-    fn compile_syntax_error() {
+    fn compile_syntax_error() -> Result<()> {
         let code = r"
             #version 460
             void main() { uint idx = gl_GlobalInvocationID.x }
         ";
-        let instance = Instance::new().unwrap();
+        let instance = Instance::new()?;
         assert!(Program::new(&instance, &code, "test.glsl", "main").is_err());
+        Ok(())
     }
 
     #[test]
-    fn compile_entry_point_error() {
+    fn compile_entry_point_error() -> Result<()> {
         let code = r"
             #version 460
             void main() { uint idx = gl_GlobalInvocationID.x; }
         ";
-        let instance = Instance::new().unwrap();
+        let instance = Instance::new()?;
         assert!(Program::new(&instance, &code, "test.glsl", "not_main").is_err());
+        Ok(())
     }
 }

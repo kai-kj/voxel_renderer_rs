@@ -1,10 +1,11 @@
-use super::errors::Error as EngineError;
+use super::errors::{EngineError, Result};
 use super::instance::Instance;
 use super::vulkan as vk;
+use std::cmp::min;
+use std::ops::Range;
 
 #[derive(Clone)]
 pub struct Buffer<T> {
-    length: usize,
     pub(super) buffer: vk::Subbuffer<[T]>,
 }
 
@@ -12,13 +13,12 @@ impl<T> Buffer<T>
 where
     T: vk::BufferContents + Clone + Copy,
 {
-    pub fn new(instance: &Instance, data: Vec<T>) -> Result<Buffer<T>, EngineError> {
-        let length = data.len();
-        if length == 0 {
-            return EngineError::ZeroSized.into();
+    pub fn new(instance: &Instance, data: Vec<T>) -> Result<Buffer<T>> {
+        if data.len() == 0 {
+            return EngineError::ZeroSized.into_result();
         }
 
-        vk::Buffer::from_iter(
+        let buffer = vk::Buffer::from_iter(
             instance.memory_allocator.clone(),
             vk::BufferCreateInfo {
                 usage: vk::BufferUsage::STORAGE_BUFFER
@@ -32,50 +32,38 @@ where
                 ..Default::default()
             },
             data,
-        )
-        .and_then(|buffer| Ok(Buffer { length, buffer }))
-        .map_err(|_| EngineError::VkBufferCreate)
+        )?;
+
+        Ok(Buffer { buffer })
     }
 
-    pub fn length(&self) -> usize {
-        self.length
+    pub fn len(&self) -> usize {
+        self.buffer.len() as usize
     }
-
-    pub fn total_size(&self) -> usize {
-        self.buffer.size() as usize
-    }
-
-    pub fn item_size(&self) -> usize {
-        size_of::<T>()
-    }
-
-    pub fn read(&self, start: usize, length: usize) -> Result<Vec<T>, EngineError> {
-        if start + length > self.length() {
-            return EngineError::OutOfBoundsRead.into();
+    pub fn sub(&self, range: Range<usize>) -> Result<Buffer<T>> {
+        if range.start >= range.end {
+            return EngineError::ZeroSized.into_result();
         }
 
-        self.buffer
-            .read()
-            .and_then(|slice| Ok(slice[start..start + length].to_vec()))
-            .map_err(|_| EngineError::VkBufferRead)
-    }
-
-    pub fn read_all(&self) -> Result<Vec<T>, EngineError> {
-        self.read(0, self.length())
-    }
-
-    pub fn write(&self, start: usize, data: Vec<T>) -> Result<(), EngineError> {
-        if start + data.len() > self.length() {
-            return EngineError::OutOfBoundsWrite.into();
+        if range.end > self.len() {
+            return EngineError::OutOfBounds.into_result();
         }
 
-        self.buffer
-            .write()
-            .and_then(|mut slice| {
-                slice[start..start + data.len()].copy_from_slice(data.as_slice());
-                Ok(())
-            })
-            .map_err(|_| EngineError::VkBufferWrite)
+        Ok(Buffer {
+            buffer: self.buffer.clone().slice(Range {
+                start: range.start as u64,
+                end: range.end as u64,
+            }),
+        })
+    }
+
+    pub fn read(&self) -> Result<Vec<T>> {
+        Ok(self.buffer.read()?.to_vec())
+    }
+
+    pub fn write(&self, data: Vec<T>) -> Result<()> {
+        self.buffer.write()?[..min(data.len(), self.len())].copy_from_slice(data.as_slice());
+        Ok(())
     }
 
     pub fn bind(&self, binding: u32) -> BufferBinding {
@@ -90,13 +78,7 @@ where
     T: vk::BufferContents + Clone + Copy,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(
-            f,
-            "Buffer {{ length: {}, total size: {}, item size: {} }}",
-            self.length(),
-            self.total_size(),
-            self.item_size()
-        )
+        write!(f, "Buffer {{ len: {} }}", self.len())
     }
 }
 
@@ -109,84 +91,102 @@ mod tests {
     use super::*;
 
     #[test]
-    fn creation() {
-        let instance = Instance::new().unwrap();
+    fn creation() -> Result<()> {
+        let instance = Instance::new()?;
         assert!(Buffer::new(&instance, (0..1024).collect()).is_ok());
+        Ok(())
     }
 
     #[test]
-    fn zero_sized_creation() {
-        let instance = Instance::new().unwrap();
+    fn zero_sized_creation() -> Result<()> {
+        let instance = Instance::new()?;
         assert!(Buffer::new(&instance, (0..0).collect()).is_err());
+        Ok(())
     }
 
     #[test]
-    fn size() {
-        let instance = Instance::new().unwrap();
-        let buffer = Buffer::new(&instance, vec![1, 2, 3, 4]).unwrap();
-
-        assert_eq!(buffer.length(), 4);
-        assert_eq!(buffer.total_size(), 16);
-        assert_eq!(buffer.item_size(), 4);
+    fn size() -> Result<()> {
+        let instance = Instance::new()?;
+        let buffer = Buffer::new(&instance, vec![1, 2, 3, 4])?;
+        assert_eq!(buffer.len(), 4);
+        Ok(())
     }
 
     #[test]
-    fn read_all() {
-        let instance = Instance::new().unwrap();
-        let buffer = Buffer::new(&instance, vec![1, 2, 3, 4]).unwrap();
-        assert_eq!(buffer.read_all().unwrap(), vec![1, 2, 3, 4]);
+    fn read() -> Result<()> {
+        let instance = Instance::new()?;
+        let buffer = Buffer::new(&instance, vec![1, 2, 3, 4])?;
+        assert_eq!(buffer.read()?, vec![1, 2, 3, 4]);
+        Ok(())
     }
 
     #[test]
-    fn read_part() {
-        let instance = Instance::new().unwrap();
-        let buffer = Buffer::new(&instance, vec![1, 2, 3, 4]).unwrap();
-        assert_eq!(buffer.read(1, 2).unwrap(), vec![2, 3]);
+    fn write() -> Result<()> {
+        let instance = Instance::new()?;
+        let buffer = Buffer::new(&instance, vec![1, 2, 3, 4])?;
+
+        buffer.write(vec![5, 6, 7, 8])?;
+        assert_eq!(buffer.read()?, vec![5, 6, 7, 8]);
+
+        buffer.write(vec![9, 10])?;
+        assert_eq!(buffer.read()?, vec![9, 10, 7, 8]);
+
+        Ok(())
     }
 
     #[test]
-    fn out_of_bounds_read() {
-        let instance = Instance::new().unwrap();
-        let buffer = Buffer::new(&instance, vec![1, 2, 3, 4]).unwrap();
-        assert!(buffer.read(0, 4).is_ok());
-        assert!(buffer.read(0, 5).is_err());
-        assert!(buffer.read(1, 4).is_err());
-        assert!(buffer.read(4, 4).is_err());
+    fn subregion_read() -> Result<()> {
+        let instance = Instance::new()?;
+        let buffer = Buffer::new(&instance, vec![1, 2, 3, 4])?;
+
+        assert_eq!(buffer.sub(0..4)?.read()?, vec![1, 2, 3, 4]);
+        assert_eq!(buffer.sub(1..3)?.read()?, vec![2, 3]);
+
+        Ok(())
     }
 
     #[test]
-    fn write() {
-        let instance = Instance::new().unwrap();
+    fn subregion_write() -> Result<()> {
+        let instance = Instance::new()?;
+        let buffer = Buffer::new(&instance, vec![1, 2, 3, 4])?;
+        let sub_buffer = buffer.sub(1..3)?;
 
-        let buffer = Buffer::new(&instance, vec![1, 2, 3, 4]).unwrap();
-        assert_eq!(buffer.read_all().unwrap(), vec![1, 2, 3, 4]);
+        sub_buffer.write(vec![5, 6])?;
+        assert_eq!(sub_buffer.read()?, vec![5, 6]);
+        assert_eq!(buffer.read()?, vec![1, 5, 6, 4]);
 
-        buffer.write(1, vec![5, 6]).unwrap();
-        assert_eq!(buffer.read_all().unwrap(), vec![1, 5, 6, 4]);
+        buffer.write(vec![7, 8, 9, 10])?;
+        assert_eq!(sub_buffer.read()?, vec![8, 9]);
+        assert_eq!(buffer.read()?, vec![7, 8, 9, 10]);
+
+        Ok(())
     }
 
     #[test]
-    fn out_of_bounds_write() {
-        let instance = Instance::new().unwrap();
-        let buffer = Buffer::new(&instance, vec![1, 2, 3, 4]).unwrap();
-        assert!(buffer.write(0, vec![1, 2, 3, 4]).is_ok());
-        assert!(buffer.write(0, vec![1, 2, 3, 4, 5]).is_err());
-        assert!(buffer.write(1, vec![1, 2, 3, 4]).is_err());
-        assert!(buffer.write(4, vec![1, 2, 3, 4]).is_err());
+    fn out_of_bounds() -> Result<()> {
+        let instance = Instance::new()?;
+        let buffer = Buffer::new(&instance, vec![1, 2, 3, 4])?;
+        assert!(buffer.sub(0..4).is_ok());
+        assert!(buffer.sub(0..0).is_err());
+        assert!(buffer.sub(0..5).is_err());
+        assert!(buffer.sub(4..8).is_err());
+        Ok(())
     }
 
     #[test]
-    fn clone() {
-        let instance = Instance::new().unwrap();
-        let buffer_a = Buffer::new(&instance, vec![1, 2, 3, 4]).unwrap();
+    fn clone() -> Result<()> {
+        let instance = Instance::new()?;
+        let buffer_a = Buffer::new(&instance, vec![1, 2, 3, 4])?;
         let buffer_b = buffer_a.clone();
 
-        assert_eq!(buffer_a.read_all().unwrap(), vec![1, 2, 3, 4]);
-        assert_eq!(buffer_b.read_all().unwrap(), vec![1, 2, 3, 4]);
+        assert_eq!(buffer_a.read()?, vec![1, 2, 3, 4]);
+        assert_eq!(buffer_b.read()?, vec![1, 2, 3, 4]);
 
-        buffer_a.write(1, vec![5, 6]).unwrap();
+        buffer_a.sub(1..3)?.write(vec![5, 6])?;
 
-        assert_eq!(buffer_a.read_all().unwrap(), vec![1, 5, 6, 4]);
-        assert_eq!(buffer_b.read_all().unwrap(), vec![1, 5, 6, 4]);
+        assert_eq!(buffer_a.read()?, vec![1, 5, 6, 4]);
+        assert_eq!(buffer_b.read()?, vec![1, 5, 6, 4]);
+
+        Ok(())
     }
 }
