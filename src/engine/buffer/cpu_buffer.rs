@@ -1,24 +1,27 @@
-use super::errors::{EngineError, Result};
-use super::instance::Instance;
-use super::vulkan as vk;
+use super::super::{
+    buffer::{Buffer, BufferBinding},
+    errors::{EngineError, Result},
+    instance::Instance,
+    vulkan as vk,
+};
 use std::cmp::min;
 use std::ops::Range;
 
 #[derive(Clone)]
-pub struct Buffer<T> {
+pub struct CpuBuffer<T> {
     pub(super) buffer: vk::Subbuffer<[T]>,
 }
 
-impl<T> Buffer<T>
+impl<T> CpuBuffer<T>
 where
     T: vk::BufferContents + Clone + Copy,
 {
-    pub fn new(instance: &Instance, data: Vec<T>) -> Result<Buffer<T>> {
-        if data.len() == 0 {
+    pub fn empty(instance: &Instance, len: usize) -> Result<CpuBuffer<T>> {
+        if len == 0 {
             return EngineError::ZeroSized.into_result();
         }
 
-        let buffer = vk::Buffer::from_iter(
+        let buffer = vk::Buffer::new_slice(
             instance.memory_allocator.clone(),
             vk::BufferCreateInfo {
                 usage: vk::BufferUsage::STORAGE_BUFFER
@@ -27,34 +30,20 @@ where
                 ..Default::default()
             },
             vk::AllocationCreateInfo {
-                memory_type_filter: vk::MemoryTypeFilter::PREFER_DEVICE
+                memory_type_filter: vk::MemoryTypeFilter::PREFER_HOST
                     | vk::MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
-            data,
+            len as vk::DeviceSize,
         )?;
 
-        Ok(Buffer { buffer })
+        Ok(CpuBuffer { buffer })
     }
 
-    pub fn len(&self) -> usize {
-        self.buffer.len() as usize
-    }
-    pub fn sub(&self, range: Range<usize>) -> Result<Buffer<T>> {
-        if range.start >= range.end {
-            return EngineError::ZeroSized.into_result();
-        }
-
-        if range.end > self.len() {
-            return EngineError::OutOfBounds.into_result();
-        }
-
-        Ok(Buffer {
-            buffer: self.buffer.clone().slice(Range {
-                start: range.start as u64,
-                end: range.end as u64,
-            }),
-        })
+    pub fn from_vec(instance: &Instance, data: Vec<T>) -> Result<CpuBuffer<T>> {
+        let buffer = Self::empty(instance, data.len())?;
+        buffer.write(data)?;
+        Ok(buffer)
     }
 
     pub fn read(&self) -> Result<Vec<T>> {
@@ -65,25 +54,41 @@ where
         self.buffer.write()?[..min(data.len(), self.len())].copy_from_slice(data.as_slice());
         Ok(())
     }
+}
 
-    pub fn bind(&self, binding: u32) -> BufferBinding {
+impl<T> Buffer<T> for CpuBuffer<T>
+where
+    T: vk::BufferContents + Clone + Copy,
+{
+    fn len(&self) -> usize {
+        self.buffer.len() as usize
+    }
+
+    fn sub(&self, range: Range<usize>) -> Result<CpuBuffer<T>> {
+        if range.start >= range.end {
+            return EngineError::ZeroSized.into_result();
+        }
+
+        if range.end > self.len() {
+            return EngineError::OutOfBounds.into_result();
+        }
+
+        Ok(CpuBuffer {
+            buffer: self.buffer.clone().slice(Range {
+                start: range.start as u64,
+                end: range.end as u64,
+            }),
+        })
+    }
+
+    fn bind(&self, binding: u32) -> BufferBinding {
         BufferBinding {
             write_descriptor_set: vk::WriteDescriptorSet::buffer(binding, self.buffer.clone()),
         }
     }
-}
-
-impl<T> std::fmt::Debug for Buffer<T>
-where
-    T: vk::BufferContents + Clone + Copy,
-{
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "Buffer {{ len: {} }}", self.len())
+    fn get_vk_buffer(&self) -> &vk::Subbuffer<[T]> {
+        &self.buffer
     }
-}
-
-pub struct BufferBinding {
-    pub(super) write_descriptor_set: vk::WriteDescriptorSet,
 }
 
 #[cfg(test)]
@@ -93,21 +98,21 @@ mod tests {
     #[test]
     fn creation() -> Result<()> {
         let instance = Instance::new()?;
-        assert!(Buffer::new(&instance, (0..1024).collect()).is_ok());
+        assert!(CpuBuffer::from_vec(&instance, (0..1024).collect()).is_ok());
         Ok(())
     }
 
     #[test]
     fn zero_sized_creation() -> Result<()> {
         let instance = Instance::new()?;
-        assert!(Buffer::new(&instance, (0..0).collect()).is_err());
+        assert!(CpuBuffer::from_vec(&instance, (0..0).collect()).is_err());
         Ok(())
     }
 
     #[test]
     fn size() -> Result<()> {
         let instance = Instance::new()?;
-        let buffer = Buffer::new(&instance, vec![1, 2, 3, 4])?;
+        let buffer = CpuBuffer::from_vec(&instance, vec![1, 2, 3, 4])?;
         assert_eq!(buffer.len(), 4);
         Ok(())
     }
@@ -115,7 +120,7 @@ mod tests {
     #[test]
     fn read() -> Result<()> {
         let instance = Instance::new()?;
-        let buffer = Buffer::new(&instance, vec![1, 2, 3, 4])?;
+        let buffer = CpuBuffer::from_vec(&instance, vec![1, 2, 3, 4])?;
         assert_eq!(buffer.read()?, vec![1, 2, 3, 4]);
         Ok(())
     }
@@ -123,7 +128,7 @@ mod tests {
     #[test]
     fn write() -> Result<()> {
         let instance = Instance::new()?;
-        let buffer = Buffer::new(&instance, vec![1, 2, 3, 4])?;
+        let buffer = CpuBuffer::from_vec(&instance, vec![1, 2, 3, 4])?;
 
         buffer.write(vec![5, 6, 7, 8])?;
         assert_eq!(buffer.read()?, vec![5, 6, 7, 8]);
@@ -137,7 +142,7 @@ mod tests {
     #[test]
     fn subregion_read() -> Result<()> {
         let instance = Instance::new()?;
-        let buffer = Buffer::new(&instance, vec![1, 2, 3, 4])?;
+        let buffer = CpuBuffer::from_vec(&instance, vec![1, 2, 3, 4])?;
 
         assert_eq!(buffer.sub(0..4)?.read()?, vec![1, 2, 3, 4]);
         assert_eq!(buffer.sub(1..3)?.read()?, vec![2, 3]);
@@ -148,7 +153,7 @@ mod tests {
     #[test]
     fn subregion_write() -> Result<()> {
         let instance = Instance::new()?;
-        let buffer = Buffer::new(&instance, vec![1, 2, 3, 4])?;
+        let buffer = CpuBuffer::from_vec(&instance, vec![1, 2, 3, 4])?;
         let sub_buffer = buffer.sub(1..3)?;
 
         sub_buffer.write(vec![5, 6])?;
@@ -165,7 +170,7 @@ mod tests {
     #[test]
     fn out_of_bounds() -> Result<()> {
         let instance = Instance::new()?;
-        let buffer = Buffer::new(&instance, vec![1, 2, 3, 4])?;
+        let buffer = CpuBuffer::from_vec(&instance, vec![1, 2, 3, 4])?;
         assert!(buffer.sub(0..4).is_ok());
         assert!(buffer.sub(0..0).is_err());
         assert!(buffer.sub(0..5).is_err());
@@ -176,7 +181,7 @@ mod tests {
     #[test]
     fn clone() -> Result<()> {
         let instance = Instance::new()?;
-        let buffer_a = Buffer::new(&instance, vec![1, 2, 3, 4])?;
+        let buffer_a = CpuBuffer::from_vec(&instance, vec![1, 2, 3, 4])?;
         let buffer_b = buffer_a.clone();
 
         assert_eq!(buffer_a.read()?, vec![1, 2, 3, 4]);

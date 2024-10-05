@@ -1,10 +1,10 @@
-use super::errors::Result;
-use super::instance::Instance;
-use super::program::Program;
-use super::vulkan as vk;
-
-use crate::engine::buffer::Buffer;
-use crate::engine::buffer::BufferBinding;
+use super::{
+    buffer::{Buffer, BufferBinding, CpuBuffer, GpuBuffer},
+    errors::Result,
+    instance::Instance,
+    program::Program,
+    vulkan as vk,
+};
 use std::future::IntoFuture;
 use std::sync::Arc;
 use vulkano::pipeline::Pipeline;
@@ -61,13 +61,17 @@ impl<'a> TaskBuilder<'a> {
         })
     }
 
-    pub fn copy_buffer<T>(mut self, src: &Buffer<T>, dst: &Buffer<T>) -> Result<TaskBuilder<'a>>
+    pub fn copy_buffer<T>(
+        mut self,
+        src: &impl Buffer<T>,
+        dst: &impl Buffer<T>,
+    ) -> Result<TaskBuilder<'a>>
     where
         T: vk::BufferContents + Clone + Copy,
     {
         self.builder.copy_buffer(vk::CopyBufferInfo::buffers(
-            src.buffer.clone(),
-            dst.buffer.clone(),
+            src.get_vk_buffer().clone(),
+            dst.get_vk_buffer().clone(),
         ))?;
         Ok(self)
     }
@@ -123,8 +127,8 @@ mod tests {
     #[test]
     fn copy_buffer() -> Result<()> {
         let instance = Instance::new()?;
-        let buffer_a = Buffer::new(&instance, vec![1, 2, 3, 4])?;
-        let buffer_b = Buffer::new(&instance, vec![0, 0, 0, 0])?;
+        let buffer_a = CpuBuffer::from_vec(&instance, vec![1, 2, 3, 4])?;
+        let buffer_b = CpuBuffer::empty(&instance, 4)?;
 
         TaskBuilder::new(&instance)?
             .copy_buffer(&buffer_a, &buffer_b)?
@@ -142,8 +146,8 @@ mod tests {
     fn copy_buffer_twice() -> Result<()> {
         let instance = Instance::new()?;
 
-        let buffer_a = Buffer::new(&instance, vec![1, 2, 3, 4])?;
-        let buffer_b = Buffer::new(&instance, vec![0, 0, 0, 0])?;
+        let buffer_a = CpuBuffer::from_vec(&instance, vec![1, 2, 3, 4])?;
+        let buffer_b = CpuBuffer::empty(&instance, 4)?;
 
         let task = TaskBuilder::new(&instance)?
             .copy_buffer(&buffer_a, &buffer_b)?
@@ -154,7 +158,7 @@ mod tests {
         assert_eq!(buffer_a.read()?, vec![1, 2, 3, 4]);
         assert_eq!(buffer_b.read()?, vec![1, 2, 3, 4]);
 
-        buffer_a.write(vec![5, 6, 7, 8]).unwrap();
+        buffer_a.write(vec![5, 6, 7, 8])?;
 
         task.submit()?.wait()?;
 
@@ -168,8 +172,8 @@ mod tests {
     fn copy_buffer_sub() -> Result<()> {
         let instance = Instance::new()?;
 
-        let buffer_a = Buffer::new(&instance, vec![1, 2, 3, 4])?;
-        let buffer_b = Buffer::new(&instance, vec![0, 0, 0, 0])?;
+        let buffer_a = CpuBuffer::from_vec(&instance, vec![1, 2, 3, 4])?;
+        let buffer_b = CpuBuffer::empty(&instance, 4)?;
 
         let task = TaskBuilder::new(&instance)?
             .copy_buffer(&buffer_a.sub(0..2)?, &buffer_b.sub(1..3)?)?
@@ -179,6 +183,26 @@ mod tests {
 
         assert_eq!(buffer_a.read()?, vec![1, 2, 3, 4]);
         assert_eq!(buffer_b.read()?, vec![0, 1, 2, 0]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn copy_gpu_buffer() -> Result<()> {
+        let instance = Instance::new()?;
+        let buffer_a = CpuBuffer::<u32>::from_vec(&instance, vec![1, 2, 3, 4])?;
+        let buffer_b = GpuBuffer::<u32>::empty(&instance, 4)?;
+        let buffer_c = CpuBuffer::<u32>::empty(&instance, 4)?;
+
+        TaskBuilder::new(&instance)?
+            .copy_buffer(&buffer_a, &buffer_b)?
+            .copy_buffer(&buffer_b, &buffer_c)?
+            .build()?
+            .submit()?
+            .wait()?;
+
+        assert_eq!(buffer_a.read()?, vec![1, 2, 3, 4]);
+        assert_eq!(buffer_c.read()?, vec![1, 2, 3, 4]);
 
         Ok(())
     }
@@ -194,7 +218,7 @@ mod tests {
 
         let instance = Instance::new()?;
         let program = Program::new(&instance, &code, "test.glsl", "main")?;
-        let buffer = Buffer::new(&instance, vec![1, 2, 3, 4])?;
+        let buffer = CpuBuffer::from_vec(&instance, vec![1, 2, 3, 4])?;
 
         TaskBuilder::new(&instance)?
             .run_program(&program, (4, 1, 1), vec![buffer.bind(0)])?
@@ -218,7 +242,7 @@ mod tests {
 
         let instance = Instance::new()?;
         let program = Program::new(&instance, &code, "test.glsl", "main")?;
-        let buffer = Buffer::new(&instance, vec![1, 2, 3, 4])?;
+        let buffer = CpuBuffer::from_vec(&instance, vec![1, 2, 3, 4])?;
 
         let task = TaskBuilder::new(&instance)?
             .run_program(&program, (4, 1, 1), vec![buffer.bind(0)])?
@@ -244,7 +268,7 @@ mod tests {
 
         let instance = Instance::new()?;
         let program = Program::new(&instance, &code, "test.glsl", "main")?;
-        let buffer = Buffer::new(&instance, vec![1, 2, 3, 4])?;
+        let buffer = CpuBuffer::from_vec(&instance, vec![1, 2, 3, 4])?;
 
         assert!(TaskBuilder::new(&instance)?
             .run_program(&program, (4, 1, 1), vec![buffer.bind(1)])

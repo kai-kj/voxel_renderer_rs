@@ -1,5 +1,8 @@
-use super::errors::{EngineError, Result};
-use super::vulkan as vk;
+use super::{
+    buffer::Buffer,
+    errors::{EngineError, Result},
+    vulkan as vk,
+};
 use std::error::Error;
 use std::sync::Arc;
 

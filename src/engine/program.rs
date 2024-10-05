@@ -1,6 +1,9 @@
-use super::errors::{EngineError, Result};
-use super::instance::Instance;
-use super::vulkan as vk;
+use super::{
+    buffer::Buffer,
+    errors::{EngineError, Result},
+    instance::Instance,
+    vulkan as vk,
+};
 use shaderc;
 use std::sync::Arc;
 
