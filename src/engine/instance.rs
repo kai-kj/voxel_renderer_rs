@@ -1,10 +1,20 @@
-use super::{
-    buffer::Buffer,
-    errors::{EngineError, Result},
-    vulkan as vk,
-};
-use std::error::Error;
+use super::*;
 use std::sync::Arc;
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum InstanceError {
+    #[error("failed to find vulkan library")]
+    NoVulkanLibrary,
+    #[error("failed to create vulkan instance")]
+    VulkanInstanceCreationFailed,
+    #[error("failed to find compatible device")]
+    NoVulkanDevice,
+    #[error("failed to find compatible queue")]
+    NoVulkanQueue,
+    #[error("failed to find create vulkan device")]
+    VulkanDeviceCreationFailed,
+}
 
 pub struct Instance {
     instance: Arc<vk::Instance>,
@@ -16,15 +26,16 @@ pub struct Instance {
 }
 
 impl Instance {
-    pub fn new() -> Result<Self> {
-        let library = vk::VulkanLibrary::new()?;
-        let instance = vk::Instance::new(library, vk::InstanceCreateInfo::default())?;
+    pub fn new() -> Result<Self, InstanceError> {
+        let library = vk::VulkanLibrary::new().map_err(|_| InstanceError::NoVulkanLibrary)?;
+        let instance = vk::Instance::new(library, vk::InstanceCreateInfo::default())
+            .map_err(|_| InstanceError::VulkanInstanceCreationFailed)?;
 
         let physical_device = instance
             .enumerate_physical_devices()
-            .expect("failed to enumerate devices")
+            .map_err(|_| InstanceError::NoVulkanDevice)?
             .next()
-            .expect("no devices available");
+            .ok_or(InstanceError::NoVulkanDevice)?;
 
         let queue_family_index = physical_device
             .queue_family_properties()
@@ -34,7 +45,7 @@ impl Instance {
                     .queue_flags
                     .contains(vk::QueueFlags::COMPUTE)
             })
-            .ok_or(EngineError::NoValidQueueFamily)? as u32;
+            .ok_or(InstanceError::NoVulkanQueue)? as u32;
 
         let (device, mut queues) = vk::Device::new(
             physical_device,
@@ -45,7 +56,8 @@ impl Instance {
                 }],
                 ..Default::default()
             },
-        )?;
+        )
+        .map_err(|_| InstanceError::VulkanDeviceCreationFailed)?;
 
         Ok(Self {
             instance: instance.clone(),
@@ -86,20 +98,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn creation() -> Result<()> {
+    fn creation() {
         assert!(Instance::new().is_ok());
-        Ok(())
     }
 
     #[test]
-    fn version() -> Result<()> {
+    fn version() {
         let instance = Instance::new().unwrap();
         let library = vk::VulkanLibrary::new().unwrap();
 
         assert!(instance.api_version().major <= library.api_version().major);
         assert!(instance.api_version().minor <= library.api_version().minor);
         assert!(instance.api_version().patch <= library.api_version().patch);
-
-        Ok(())
     }
 }
